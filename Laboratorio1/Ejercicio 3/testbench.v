@@ -8,7 +8,7 @@ wire pwm_out;
 
 integer i;
 
-// Instancia del módulo a probar
+// Instancia del mÃ³dulo a probar
 pwm_generator uut (
     .clk(clk),
     .level(level),
@@ -16,11 +16,11 @@ pwm_generator uut (
 );
 
 
-// Generador de clock (100 MHz)
+// Generador de clock 
 always #5 clk = ~clk;
 
 
-// Inicialización
+// InicializaciÃ³n
 initial begin
 
     clk = 0;
@@ -29,24 +29,23 @@ initial begin
 end
 
 
-// Estímulos de prueba
+// EstÃ­mulos de prueba
 initial begin
 
-    // esperar un poco al inicio
+    
     #20;
 
-    // recorrer todos los valores de 4 bits
+    // recorrer todos los valores
     for(i = 0; i < 16; i = i + 1) begin
         
         level = i;
 
-        // esperar tiempo suficiente para ver el PWM
+        
         repeat(120000) @(posedge clk);
 
     end
 
-    // detener simulación
-   // $stop;
+    
 
 end
 
