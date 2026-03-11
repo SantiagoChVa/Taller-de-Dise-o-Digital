@@ -1,8 +1,8 @@
 module pwm_generator(
 
     input clk,          
-    input [3:0] sw,     // switches SW0-SW3
-    output reg led      // LED
+    input [3:0] SW,     // switches SW0-SW3
+    output reg LED      // LED
 
 );
 
@@ -12,7 +12,7 @@ parameter PERIOD = 100000;   // ≈1 ms
 
 wire [16:0] duty;
 
-assign duty = (sw * PERIOD) / 16;
+    assign duty = (SW * PERIOD) / 16;
 
 always @(posedge clk)
 begin
@@ -25,9 +25,9 @@ begin
 
     // generación de PWM
     if(counter < duty)
-        led <= 1;
+        LED <= 1;
     else
-        led <= 0;
+        LED <= 0;
 
 end
 
