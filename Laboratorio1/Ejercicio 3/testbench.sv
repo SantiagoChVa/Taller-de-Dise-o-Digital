@@ -1,35 +1,35 @@
 `timescale 1ns / 1ps
 
-module testbench;
+module TESTBENCH;
 
-reg clk;
-reg [3:0] sw;
-wire led;
+reg CLK;
+reg [3:0] SW;
+wire LED;
 
-integer i;
+integer I;
 
-pwm_generator uut(
-    .clk(clk),
-    .sw(sw),
-    .led(led)
+PWM_GENERATOR UUT(
+    .CLK(CLK),
+    .SW(SW),
+    .LED(LED)
 );
 
-always #5 clk = ~clk;
+always #5 CLK = ~CLK;
 
 initial begin
-    clk = 0;
+    CLK = 0;
 end
 
 initial begin
 
-    sw = 0;
+    SW = 0;
 
-    for(i = 0; i < 16; i = i + 1) begin
-        sw = i;
-        repeat(120000) @(posedge clk);
+    for(I = 0; I < 16; I = I + 1) begin
+        SW = I;
+        repeat(120000) @(posedge CLK);
     end
 
-    //$finish;
+    $finish;
 
 end
 
