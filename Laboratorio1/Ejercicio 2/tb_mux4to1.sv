@@ -51,9 +51,8 @@ module tb_mux4to1;
 
     initial begin
 
-        // ======================
         // TEST WIDTH = 4
-        // ======================
+    
         repeat(50) begin
 
             in0_4 = $random;
@@ -77,9 +76,8 @@ module tb_mux4to1;
         $display("WIDTH 4 OK");
 
 
-        // ======================
         // TEST WIDTH = 8
-        // ======================
+
         repeat(50) begin
 
             in0_8 = $random;
@@ -103,9 +101,8 @@ module tb_mux4to1;
         $display("WIDTH 8 OK");
 
 
-        // ======================
         // TEST WIDTH = 16
-        // ======================
+
         repeat(50) begin
 
             in0_16 = $random;
