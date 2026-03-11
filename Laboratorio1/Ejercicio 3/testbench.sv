@@ -3,49 +3,33 @@
 module testbench;
 
 reg clk;
-reg [3:0] level;
-wire pwm_out;
+reg [3:0] sw;
+wire led;
 
 integer i;
 
-// Instancia del módulo a probar
-pwm_generator uut (
+pwm_generator uut(
     .clk(clk),
-    .level(level),
-    .pwm_out(pwm_out)
+    .sw(sw),
+    .led(led)
 );
 
-
-// Generador de clock 
 always #5 clk = ~clk;
 
-
-// Inicialización
 initial begin
-
     clk = 0;
-    level = 0;
-
 end
 
-
-// Estímulos de prueba
 initial begin
 
-    
-    #20;
+    sw = 0;
 
-    // recorrer todos los valores
     for(i = 0; i < 16; i = i + 1) begin
-        
-        level = i;
-
-        
+        sw = i;
         repeat(120000) @(posedge clk);
-
     end
 
-    
+    //$finish;
 
 end
 
