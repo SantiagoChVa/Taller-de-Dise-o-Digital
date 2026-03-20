@@ -1,0 +1,140 @@
+# Ejercicio 4 – Comunicación UART en FPGA (TX + RX)
+
+## Objetivo
+
+Implementar un sistema de comunicación UART completo en la FPGA Nexys 4 DDR que permita:
+- Transmitir un mensaje predefinido al presionar un botón
+- Recibir datos desde la PC mediante conexión serial
+- Visualizar los datos recibidos en los LEDs
+
+## Fundamento Teórico
+La comunicación UART (Universal Asynchronous Receiver/Transmitter) es un protocolo serial asíncrono que transmite datos bit a bit.
+Cada trama de datos incluye:
+- 1 bit de inicio (start bit)
+- 8 bits de datos
+- 1 bit de parada (stop bit)
+- Sin paridad (8N1)
+
+La velocidad de transmisión (baud rate) se define mediante:
+CLKS_PER_BIT = Frecuencia del reloj / Baud rate
+En este diseño:
+- Frecuencia del sistema: 100 MHz
+- Baud rate: 9600
+- CLKS_PER_BIT = 10417
+
+## Metodología de Diseño
+El desarrollo se realizó siguiendo el flujo completo en Vivado:
+1. Diseño modular del sistema UART (TX y RX independientes)
+2. Integración mediante módulo superior (`uart_top`)
+3. Implementación de FSM para control de transmisión
+4. Sincronización y debounce del botón
+5. Simulación funcional con testbench
+6. Asignación de pines mediante archivo XDC
+7. Validación en hardware con terminal serial
+
+## Arquitectura del Sistema
+
+El sistema se divide en tres bloques principales:
+### 🔹 Transmisor UART (uart_tx)
+- Implementa una máquina de estados (FSM)
+- Envía:
+  - Start bit
+  - 8 bits de datos (LSB primero)
+  - Stop bit
+- Genera señales de control:
+  - `o_Tx_Done`
+  - `o_Tx_Active`
+
+### 🔹 Receptor UART (uart_rx)
+- Detecta el start bit
+- Muestrea los bits en el centro del periodo
+- Reconstruye el byte recibido
+- Genera una señal `o_Rx_DV` cuando el dato es válido
+
+Incluye:
+- Sincronizador de doble flip-flop (evita metastabilidad)
+- Máquina de estados para recepción
+
+### 🔹 Módulo de alto nivel (uart_top)
+
+Integra todo el sistema:
+- Entrada:
+  - Clock 100 MHz
+  - Botón (BTNC)
+  - Señal UART desde PC
+
+- Salida:
+  - Señal UART hacia PC
+  - LEDs con datos recibidos
+
+## Transmisión – "Hola mundo"
+
+El módulo `hello_sender` envía el mensaje:
+"Hola mundo\r\n"
+
+### Funcionamiento:
+1. Se presiona el botón
+2. Se aplica debounce (evita rebotes)
+3. Se genera un pulso limpio
+4. Se activa una FSM:
+
+Estados:
+- IDLE
+- LOAD (carga el byte)
+- WAIT (espera fin de transmisión)
+
+5. Se envía cada carácter usando `uart_tx`
+
+## Debounce del botón
+Se implementa un contador que valida estabilidad de la señal antes de aceptar el cambio.
+
+Resultado:
+- No es necesario presionar fuerte
+- No se generan múltiples envíos por rebote
+
+## Recepción de datos
+
+El módulo `uart_rx` recibe datos desde la PC:
+- Entrada: `UART_TXD_IN`
+- Salida: `o_Rx_Byte`
+
+Cuando se recibe un byte válido:
+```verilog
+if (w_Rx_DV)
+    LED[7:0] <= w_Rx_Byte;
+
+Testbench:
+
+Se utilizó un testbench que:
+-Genera reloj
+-Simula transmisión (TX)
+-Simula recepción (RX)
+-Verifica el byte recibido
+
+Ejemplo:
+-Envía 0xAB
+-Recibe 0x3F
+-Compara resultado
+
+Validación en Hardware
+El sistema fue probado en la FPGA Nexys 4 DDR utilizando una terminal serial en Windows:
+Software utilizado: PuTTY
+Conexión: USB-UART de la FPGA
+Configuración:
+-9600 baudios
+-8 bits de datos
+-Sin paridad
+-1 bit de parada
+
+Resultados obtenidos:
+✔ Al presionar el botón se envía correctamente:
+"Hola mundo"
+✔ El debounce funciona correctamente (sin rebotes)
+✔ Se pueden enviar caracteres desde el teclado:
+-Letras
+-Números
+-Espacios
+-Caracteres especiales
+✔ Los datos recibidos se reflejan correctamente en los LEDs
+
+Resultados: Comunicación UART completamente funcional, transmisión y recepción correctas, integración hardware-software exitosa y diseño modular inclusive escalable
