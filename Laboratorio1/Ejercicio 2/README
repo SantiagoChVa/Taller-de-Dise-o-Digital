@@ -1,0 +1,88 @@
+# README – Ejercicio 2  
+
+```markdown
+# Ejercicio 2 – Multiplexor 4 a 1 Parametrizable
+
+##  Objetivo
+
+Diseñar un multiplexor 4:1 parametrizable que permita seleccionar una de cuatro entradas de ancho configurable (WIDTH) mediante una señal de selección de 2 bits.
+
+El diseño debe funcionar para:
+
+- WIDTH = 4 bits
+- WIDTH = 8 bits
+- WIDTH = 16 bits
+
+
+## Fundamento Teórico
+
+Un multiplexor 4:1 selecciona una de cuatro entradas según:
+
+sel | salida
+----|--------
+00  | in0
+01  | in1
+10  | in2
+11  | in3
+
+Ecuación general:
+
+y = in_sel
+
+
+## Metodología de Diseño
+
+El diseño fue desarrollado usando:
+
+- Parametrización mediante `parameter`
+- Modelado combinacional con `always_comb`
+- Verificación exhaustiva con generación aleatoria de datos
+- Síntesis en Vivado
+
+Se garantizó:
+
+- Diseño completamente combinacional
+- Ausencia de latches
+- Escalabilidad sin modificar estructura interna
+
+## Implementación
+
+### Parametrización
+
+```verilog
+parameter int unsigned WIDTH = 4
+
+Lógica de selección:
+always_comb begin
+    y = '0;
+    case(sel)
+        2'b00: y = in0;
+        2'b01: y = in1;
+        2'b10: y = in2;
+        2'b11: y = in3;
+    endcase
+end
+
+Interpretación en Hardware
+
+Vivado implementa esto como: Un multiplexor 4:1 por cada bit, mapeado en LUTs, no presenta sin registros y no usa sin elementos secuenciales.
+
+Sobre el Testbench:
+
+Se instanciaron tres versiones del módulo:
+
+-WIDTH 4
+-WIDTH 8
+-WIDTH 16
+
+Para cada una:
+-50 conjuntos de datos aleatorios
+-Prueba de las 4 selecciones posibles
+-Verificación automática mediante $fatal
+
+Resultados
+
+✔ 50 pruebas × 4 selecciones × 3 tamaños
+✔ Sin errores en simulación
+✔ Diseño escalable
+✔ Uso exclusivo de LUTs
