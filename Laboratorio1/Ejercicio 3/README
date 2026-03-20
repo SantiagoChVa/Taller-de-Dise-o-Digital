@@ -1,0 +1,60 @@
+# README – Ejercicio 3  
+
+```markdown
+# Ejercicio 3 – Generador PWM Controlado por Switches
+
+## Objetivo
+
+Diseñar un generador de señal PWM cuyo ciclo de trabajo sea controlado por un valor de 4 bits proveniente de los switches de la FPGA.
+
+La señal PWM debe tener:
+- Periodo ≈ 1 ms
+- Control de brillo de un LED
+
+## Fundamento Teórico
+
+La modulación por ancho de pulso (PWM) consiste en variar el tiempo en alto dentro de un periodo fijo.
+
+Voltaje promedio:
+V_avg = D * V_max
+donde D es el duty cycle.
+
+## Metodología de Diseño
+
+El diseño se realizó mediante:
+1. Contador síncrono
+2. Comparador
+3. Control del LED según duty cycle
+4. Implementación en FPGA
+5. Simulación temporal con testbench
+
+## 🧩 Implementación
+
+### Parámetro de periodo
+
+```verilog
+parameter PERIOD = 100000;
+Con reloj de 100 MHz: Periodo = 100000 ciclos = 1 ms
+
+Cálculo del duty cycle : assign duty = (SW * PERIOD) / 16; 
+  Recordar: Este metodo en el que se calcula el duty cycle es riesgoso en otros calculos, el uso de una multiplicación y una división puede tomar muchos recursos de la fpga, en este caso todo sale bien por el uso de una constante y un número multiplo de 2 pero al usar una variable se recomienda en un proceso calculos aparte.
+
+Testbench:
+-Generación de reloj (100 MHz)
+-Recorrido de SW de 0 a 15
+-Espera de 120000 ciclos por valor
+-Verificación visual del comportamiento
+Interpretación en Hardware
+
+Vivado implementa:
+-Registro contador (17 bits)
+-Multiplicador/divisor optimizado
+-Comparador
+-Flip-flop para LED
+Es un diseño secuencial síncrono.
+
+Resultados:
+✔ PWM funcional.
+✔ Control de brillo observable.
+✔ Periodo aproximado de 1 ms.
+✔ Funcionamiento estable en FPGA.
