@@ -1,0 +1,69 @@
+# Ejercicio 1 – Complemento a 2 (4 bits)
+
+## Objetivo
+
+Diseñar un módulo combinacional que reciba un valor binario de 4 bits desde los switches de la FPGA Nexys 4 DDR y entregue como salida su equivalente en complemento a 2, mostrado en los LEDs de la tarjeta.
+
+---
+
+## Fundamento Teórico
+
+El complemento a 2 de un número binario se calcula mediante:
+
+1. Inversión bit a bit (complemento a 1)
+2. Suma de 1 al resultado
+
+Matemáticamente:
+
+C2(x) = ~x + 1
+
+En 4 bits permite representar números en el rango:
+
+-8 a 7
+
+---
+
+## Metodología de Diseño
+
+El desarrollo se realizó siguiendo el flujo de diseño en Vivado:
+
+1. Especificación del sistema (4 entradas → 4 salidas)
+2. Implementación en Verilog usando asignación continua
+3. Simulación comportamental con testbench
+4. Síntesis y verificación de ausencia de latches
+5. Implementación en FPGA Nexys 4 DDR
+
+---
+
+## Implementación
+
+El módulo se implementó como lógica combinacional pura utilizando:
+
+```verilog
+assign LED = ~SW + 1;
+
+Verificación: Se desarrolló un testbench que aplica múltiples valores a la entrada SW y observa la salida LED.
+
+Se validó:
+
+-Correcta transformación al complemento a 2
+
+-Ausencia de errores en simulación
+
+-Funcionamiento físico en la FPGA
+
+Interpretación en Hardware
+
+Vivado sintetiza esta expresión como:
+
+-4 inversores
+
+-1 sumador de 4 bits
+
+-Implementación en LUTs
+
+-Sin flip-flops
+
+-Sin latches
+
+Resultados: Se cumple con un diseño completamente combinacional, no se generaron elementos de memoria y funcionamiento correcto en simulación y hardware
