@@ -18,12 +18,13 @@
 // Additional Comments:
 // 
 //////////////////////////////////////////////////////////////////////////////////
-
-
 module testbench;
 
-reg [3:0] SW;
+reg  [3:0] SW;
 wire [3:0] LED;
+
+integer i;
+integer errors = 0;
 
 comp2 uut (
     .SW(SW),
@@ -32,15 +33,27 @@ comp2 uut (
 
 initial begin
 
-    SW = 4'b0000;
-    #10 SW = 4'b0001;
-    #10 SW = 4'b0010;
-    #10 SW = 4'b0101;
-    #10 SW = 4'b1010;
-    #10 SW = 4'b1111;
-
-    #10 $finish;
-
+    $display("Iniciando pruebas del módulo comp2...");
+    
+    // Probar todos los valores posibles de 4 bits
+    for (i = 0; i < 16; i = i + 1) begin
+        SW = i[3:0];
+        #10;
+        if (LED !== (~SW + 1)) begin
+            $display("ERROR: SW = %b | LED = %b | Esperado = %b",
+                     SW, LED, (~SW + 1));
+            errors = errors + 1;
+        end
+        else begin
+            $display("OK: SW = %b | LED = %b",
+                     SW, LED);
+        end
+    end
+    // Resultado final
+    if (errors == 0)
+        $display("Todas las pruebas pasaron correctamente.");
+    else
+        $display("Se encontraron %0d errores.", errors);
+    $finish;
 end
-
 endmodule
