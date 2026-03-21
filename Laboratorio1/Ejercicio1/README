@@ -67,3 +67,5 @@ Vivado sintetiza esta expresión como:
 -Sin latches
 
 Resultados: Se cumple con un diseño completamente combinacional, no se generaron elementos de memoria y funcionamiento correcto en simulación y hardware
+
+Video demostrativo: https://youtube.com/shorts/m0C0BoOx6X4?feature=share
