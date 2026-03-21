@@ -1,20 +1,20 @@
 module pwm_generator(
 
-    input clk,          
-    input [3:0] SW,     // switches SW0-SW3
-    output reg LED      // LED
+    input logic clk,          
+    input logic [3:0] SW,     // switches SW0-SW3
+    output logic LED      // LED
 
 );
 
-reg [16:0] counter = 0;
+logic [16:0] counter = 0;
 
-parameter PERIOD = 100000;   // ≈1 ms 
+parameter int PERIOD = 100000;   // ≈1 ms 
 
-wire [16:0] duty;
+logic [16:0] duty;
 
     assign duty = (SW * PERIOD) / 16;
 
-always @(posedge clk)
+always_ff @(posedge clk)
 begin
 
     // contador
