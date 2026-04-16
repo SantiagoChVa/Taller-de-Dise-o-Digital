@@ -1,175 +1,161 @@
 module bus_driver (
     input  logic        clk_i,
     input  logic        rst_i,
-
-    // PicoRV32
-    input  logic        mem_valid,
-    input  logic [31:0] mem_addr,
-    input  logic [31:0] mem_wdata,
-    input  logic [ 3:0] mem_wstrb,
-    output logic        mem_ready,
-    output logic [31:0] mem_rdata,
-
+    
+    // CPU
+    input  logic        mem_valid_i,
+    input  logic        mem_instr_i,
+    input  logic [31:0] mem_addr_i,
+    input  logic [31:0] mem_wdata_i,
+    input  logic [3:0]  mem_wstrb_i,
+    output logic [31:0] mem_rdata_o,
+    output logic        mem_ready_o,
+    
     // ROM
-    output logic [ 8:0] rom_addr,
-    input  logic [31:0] rom_data,
-
+    output logic [8:0]  rom_addr_o,
+    input  logic [31:0] rom_rdata_i,
+    input  logic        rom_busy_i,
+    
     // RAM
-    output logic [14:0] ram_addr,
-    output logic [31:0] ram_wdata,
-    output logic [ 3:0] ram_we,
-    input  logic [31:0] ram_rdata,
-
-    // LEDs y switches
-    output logic [15:0] led_reg,
-    input  logic [15:0] sw_reg,
-
+    output logic        ram_we_o,
+    output logic [14:0] ram_addr_o,
+    output logic [31:0] ram_wdata_o,
+    input  logic [31:0] ram_rdata_i,
+    
+    // IO
+    input  logic [15:0] switches_i,
+    output logic [15:0] leds_o,
+    
     // UART
-    output logic        uart_tx_dv,
-    input  logic        uart_tx_active,
-    input  logic        uart_tx_done,
-    output logic [ 7:0] uart_tx_byte,
-    input  logic        uart_rx_dv,
-    input  logic [ 7:0] uart_rx_byte
+    output logic        uart_tx_dv_o,
+    output logic [7:0]  uart_tx_byte_o,
+    input  logic        uart_tx_active_i,
+    input  logic        uart_tx_done_i,
+    
+    input  logic        uart_rx_dv_i,
+    input  logic [7:0]  uart_rx_byte_i,
+    output logic        uart_rx_ack_o
 );
 
-    // ── registros internos de periféricos ──────────────────────
-    logic [31:0] uart_ctrl_reg;   // 0x02010: bit0=send, bit1=new_rx
-    logic [31:0] uart_data0_reg;  // 0x02018: dato a transmitir
-    logic [31:0] uart_data1_reg;  // 0x0201C: dato recibido
+    //=========================================================================
+    // REGISTROS DE TRANSACCIÓN (capturan al inicio del handshake)
+    //=========================================================================
+    logic [31:0] addr_reg;
+    logic [31:0] wdata_reg;
+    logic [3:0]  wstrb_reg;
+    logic        instr_reg;
 
-    // ── latencia BRAM: contador de 2 ciclos ────────────────────
-    logic        waiting;
-    logic        wait_cnt;
-
-    // ── capturar byte recibido por UART ────────────────────────
     always_ff @(posedge clk_i) begin
         if (rst_i) begin
-            uart_data1_reg <= '0;
-            uart_ctrl_reg  <= '0;
+            addr_reg  <= 0;
+            wdata_reg <= 0;
+            wstrb_reg <= 0;
+            instr_reg <= 0;
         end else begin
-            // Cuando llega un byte nuevo del RX, guardarlo y setear new_rx
-            if (uart_rx_dv) begin
-                uart_data1_reg        <= {24'b0, uart_rx_byte};
-                uart_ctrl_reg[1]      <= 1'b1;  // new_rx = 1
-            end
-            // Cuando TX termina, limpiar el bit send
-            if (uart_tx_done) begin
-                uart_ctrl_reg[0]      <= 1'b0;  // send = 0
+            // Capturar cuando llega una nueva transacción válida
+            if (mem_valid_i && !mem_ready_o) begin
+                addr_reg  <= mem_addr_i;
+                wdata_reg <= mem_wdata_i;
+                wstrb_reg <= mem_wstrb_i;
+                instr_reg <= mem_instr_i;
             end
         end
     end
 
-    // ── lógica de mem_ready (maneja latencia de BRAM) ──────────
+    //=========================================================================
+    // READY (latencia de 1 ciclo)
+    //=========================================================================
+    logic valid_d;
+
     always_ff @(posedge clk_i) begin
         if (rst_i) begin
-            mem_ready <= 1'b0;
-            waiting   <= 1'b0;
-            wait_cnt  <= 1'b0;
+            valid_d     <= 0;
+            mem_ready_o <= 0;
         end else begin
-            mem_ready <= 1'b0;  // default: no listo
-
-            if (mem_valid && !mem_ready) begin
-
-                // Periféricos: responden en 1 ciclo
-                if (mem_addr == 32'h02000 ||
-                    mem_addr == 32'h02004 ||
-                    mem_addr == 32'h02010 ||
-                    mem_addr == 32'h02018 ||
-                    mem_addr == 32'h0201C) begin
-                    mem_ready <= 1'b1;
-                    waiting   <= 1'b0;
-                    wait_cnt  <= 1'b0;
-
-                // ROM y RAM: esperan 2 ciclos de BRAM
-                end else if (!waiting) begin
-                    waiting  <= 1'b1;
-                    wait_cnt <= 1'b0;
-                end else begin
-                    if (wait_cnt == 1'b1) begin
-                        mem_ready <= 1'b1;
-                        waiting   <= 1'b0;
-                        wait_cnt  <= 1'b0;
-                    end else begin
-                        wait_cnt <= 1'b1;
-                    end
-                end
-
-            end
+            valid_d     <= mem_valid_i;
+            mem_ready_o <= valid_d;
         end
     end
 
-    // ── lógica combinacional: mux de lectura y escritura ───────
+    //=========================================================================
+    // DECODIFICACIÓN DE DIRECCIONES
+    //=========================================================================
+    logic rom_sel, ram_sel, io_sel;
+
     always_comb begin
-        // defaults
-        mem_rdata    = 32'h0;
-        rom_addr     = 9'h0;
-        ram_addr     = 15'h0;
-        ram_we       = 4'h0;
-        ram_wdata    = 32'h0;
-        uart_tx_dv   = 1'b0;
-        uart_tx_byte = 8'h0;
+        rom_sel = instr_reg;
 
-        // ── ROM: 0x0000 – 0x0FFF ───────────────────────────────
-        if (mem_addr >= 32'h0000 && mem_addr <= 32'h0FFF) begin
-            rom_addr  = mem_addr[10:2];
-            mem_rdata = rom_data;
+        ram_sel = (addr_reg[31:16] == 16'h0004 ||
+                   addr_reg[31:16] == 16'h0005 ||
+                   addr_reg[31:16] == 16'h0006 ||
+                   addr_reg[31:16] == 16'h0007);
 
-        // ── Switches/Botones: 0x02000 ──────────────────────────
-        end else if (mem_addr == 32'h02000) begin
-            mem_rdata = {16'b0, sw_reg};
-
-        // ── LEDs: 0x02004 ──────────────────────────────────────
-        end else if (mem_addr == 32'h02004) begin
-            mem_rdata = {16'b0, led_reg};
-
-        // ── UART control: 0x02010 ──────────────────────────────
-        end else if (mem_addr == 32'h02010) begin
-            mem_rdata = uart_ctrl_reg;
-            // escritura: el programa pone send=1
-            if (mem_wstrb != 4'h0) begin
-                // si escribe bit0 (send), disparar TX
-                if (mem_wdata[0] && !uart_tx_active) begin
-                    uart_tx_dv   = 1'b1;
-                    uart_tx_byte = uart_data0_reg[7:0];
-                end
-            end
-
-        // ── UART data0 (TX): 0x02018 ───────────────────────────
-        end else if (mem_addr == 32'h02018) begin
-            mem_rdata = uart_data0_reg;
-
-        // ── UART data1 (RX): 0x0201C ───────────────────────────
-        end else if (mem_addr == 32'h0201C) begin
-            mem_rdata = uart_data1_reg;
-            // leer data1 limpia el bit new_rx (lo maneja el ff de arriba
-            // pero el programa debe escribir 0 al ctrl)
-
-        // ── RAM: 0x40000 – 0x7FFFF ─────────────────────────────
-        end else if (mem_addr >= 32'h40000 && mem_addr <= 32'h7FFFF) begin
-            ram_addr  = mem_addr[16:2];
-            ram_wdata = mem_wdata;
-            ram_we    = mem_wstrb;
-            mem_rdata = ram_rdata;
-        end
+        io_sel  = !rom_sel && !ram_sel;
     end
 
-    // ── escritura de registros de periféricos (secuencial) ─────
-    always_ff @(posedge clk_i) begin
-        if (rst_i) begin
-            led_reg       <= '0;
-            uart_data0_reg <= '0;
-        end else if (mem_valid && mem_ready && mem_wstrb != 4'h0) begin
-            case (mem_addr)
-                32'h02004: led_reg        <= mem_wdata[15:0];
-                32'h02018: uart_data0_reg <= mem_wdata;
-                32'h02010: begin
-                    // limpiar new_rx si el programa escribe 0 en bit1
-                    uart_ctrl_reg[1] <= mem_wdata[1];
-                end
-                default: ;
+    assign rom_addr_o = addr_reg[10:2];
+    assign ram_addr_o = addr_reg[16:2];
+    assign ram_we_o   = ram_sel && |wstrb_reg;
+    assign ram_wdata_o = wdata_reg;
+
+    //=========================================================================
+    // LECTURA COMBINACIONAL
+    //=========================================================================
+    always_comb begin
+        mem_rdata_o = 32'h0;
+
+        if (rom_sel) begin
+            mem_rdata_o = rom_rdata_i;
+        end else if (ram_sel) begin
+            mem_rdata_o = ram_rdata_i;
+        end else begin
+            case (addr_reg)
+                32'h00002000: mem_rdata_o = {16'h0, switches_i};
+                32'h00002004: mem_rdata_o = {16'h0, leds_o};
+                default:      mem_rdata_o = 32'h0;
             endcase
         end
     end
+
+    //=========================================================================
+    // LEDS (escritura registrada)
+    //=========================================================================
+    always_ff @(posedge clk_i) begin
+        if (rst_i) begin
+            leds_o <= 16'h0;
+        end else if (mem_ready_o && |wstrb_reg && addr_reg == 32'h00002004) begin
+            leds_o <= wdata_reg[15:0];
+        end
+    end
+
+    //=========================================================================
+    // UART (versión final robusta)
+    //=========================================================================
+    logic [7:0] tx_reg;
+    logic       uart_tx_dv_reg;
+
+    always_ff @(posedge clk_i) begin
+        if (rst_i) begin
+            tx_reg          <= 8'h00;
+            uart_tx_dv_reg  <= 1'b0;
+        end else begin
+            uart_tx_dv_reg <= 1'b0;  // pulso de 1 ciclo
+
+            // escritura del dato a transmitir
+            if (mem_ready_o && |wstrb_reg && addr_reg == 32'h00002018) begin
+                tx_reg <= wdata_reg[7:0];
+            end
+
+            // disparador de transmisión
+            if (mem_ready_o && |wstrb_reg &&
+                addr_reg == 32'h00002010 && wdata_reg[0]) begin
+                uart_tx_dv_reg <= 1'b1;
+            end
+        end
+    end
+
+    assign uart_tx_byte_o = tx_reg;
+    assign uart_tx_dv_o   = uart_tx_dv_reg;
+    assign uart_rx_ack_o  = 1'b0;  // no implementado
 
 endmodule
