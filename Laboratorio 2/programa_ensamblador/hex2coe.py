@@ -1,3 +1,7 @@
+# Script para convertir programa.hex a programa.coe
+# El formato .coe es requerido por Vivado para inicializar la ROM
+
+# Leer archivo hex generado por objcopy
 data = open('programa.hex').read()
 words = []
 bytes_list = []
