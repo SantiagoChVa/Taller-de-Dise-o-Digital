@@ -28,12 +28,16 @@ make
 
 ## Mapa de memoria usado
 
-| Dirección | Periférico |
-|-----------|------------|
-| 0x02004   | LEDs |
-| 0x02010   | UART control |
-| 0x02018   | UART TX |
-| 0x0201C   | UART RX |
+| Dirección | Nombre           | Descripción                                  |
+|-----------|------------------|----------------------------------------------|
+| 0x0000    | ROM              | Inicio del programa, arranca aquí            |
+| 0x07FC    | ROM fin          | Fin de la memoria de programa (512 palabras) |
+| 0x02000   | Switches/Botones | Registro de lectura de switches y botones    |
+| 0x02004   | LEDs             | Registro de escritura de LEDs                |
+| 0x02010   | UART A - Ctrl    | Bit 0 = send, Bit 1 = new_rx                |
+| 0x02018   | UART A - Data 1  | Dato a transmitir (TX)                       |
+| 0x0201C   | UART A - Data 2  | Dato recibido (RX)                           |
+| 0x40000   | RAM inicio       | Stack pointer y datos, hasta 0x7FFFF         |
 
 ## Herramientas
 
