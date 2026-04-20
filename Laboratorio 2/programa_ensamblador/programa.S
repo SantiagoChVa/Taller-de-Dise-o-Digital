@@ -1,3 +1,6 @@
+# Programa principal en ensamblador RV32I
+# Laboratorio 2 - Microcontrolador RISC-V
+# Recibe una expresión numérica por UART, calcula y responde el resultado
 .section .text
 .global _start
 
