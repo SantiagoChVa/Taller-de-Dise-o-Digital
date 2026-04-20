@@ -1,3 +1,6 @@
+# Makefile para compilar el programa ensamblador RV32I
+# Uso: make (compilar), make clean (limpiar), make dump (ver instrucciones)
+
 # Configuración
 CROSS = riscv64-unknown-elf
 ARCH = rv32i
