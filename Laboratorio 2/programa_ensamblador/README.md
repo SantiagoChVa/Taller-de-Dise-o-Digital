@@ -9,7 +9,7 @@ El programa corre indefinidamente en el microcontrolador y realiza lo siguiente:
 1. Inicializa los LEDs en 0xAAAA para indicar que el sistema está listo
 2. Espera recibir una expresión por UART con el formato: `número + número` o `número - número`
 3. Hace eco de cada carácter recibido
-4. Al recibir Enter calcula el resultado y lo envía por UART
+4. Al recibir cualquier carácter no numérico después del segundo número calcula el resultado y lo envía por UART
 
 ## Archivos
 
@@ -35,9 +35,9 @@ make
 | 0x02000   | Switches/Botones | Registro de lectura de switches y botones    |
 | 0x02004   | LEDs             | Registro de escritura de LEDs                |
 | 0x02010   | UART A - Ctrl    | Bit 0 = send, Bit 1 = new_rx                |
-| 0x02018   | UART A - Data 1  | Dato a transmitir (TX)                       |
-| 0x0201C   | UART A - Data 2  | Dato recibido (RX)                           |
-| 0x40000   | RAM inicio       | Stack pointer y datos, hasta 0x7FFFF         |
+| 0x02018   | UART A - Data 1  | Dato a transmitir (TX), offset 8(s4)         |
+| 0x0201C   | UART A - Data 2  | Dato recibido (RX), offset 12(s4)            |
+| 0x40000   | RAM inicio       | Stack pointer y datos, tope en 0x58FFC       |
 
 ## Herramientas
 
