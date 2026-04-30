@@ -13,6 +13,8 @@ Enlace al funcionamiento del sistema:
 [https://youtu.be/vNOWPl6ovI0]
 
 Integrantes
+
+
 Jose Emanuel VS-
 Santiago Chavarria A- 
 Andrés Madrigal C-
