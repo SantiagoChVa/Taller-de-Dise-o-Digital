@@ -18,4 +18,4 @@ Integrantes
 Jose Emanuel VS-
 Santiago Chavarria A- 
 Andrés Madrigal C-
-Thomas R 
+Thomas Reed V
