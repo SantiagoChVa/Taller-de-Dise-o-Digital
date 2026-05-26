@@ -1,33 +1,40 @@
 // =============================================================================
-// spi_master.sv  - v2
-// Maestro SPI modo 0 (CPOL=0, CPHA=0) para ADXL362.
+// spi_master.sv  -  Maestro SPI para ADXL362 (Nexys 4 DDR)
 //
-// CORRECCIONES v2:
-//   1. cmd y tx_bytes se registran en el momento del start_pulse (latch interno),
-//      no dependen de ctrl_reg_i combinacional durante la transacción.
-//   2. shift_rx se inicializa a 0 en S_SETUP para evitar datos residuales.
-//   3. start_pulse se genera sobre start_reg interno ya latcheado, no sobre
-//      ctrl_reg_i directamente, eliminando la dependencia del auto-clear externo.
+// Interfaz con periph_hub:
+//   ctrl_reg_i [7:4] = cmd   0 → WRITE (byte0 = 0x0A)
+//                            1 → READ  (byte0 = 0x0B)
+//   ctrl_reg_i [0]   = start (pulso de 1 ciclo, generado por periph_hub)
+//   tx_reg_i  [15:8] = reg_addr del ADXL362
+//   tx_reg_i  [ 7:0] = dato a escribir (0x00 en lecturas)
 //
-// Protocolo:
-//   ctrl_reg_i[0]   = start  (nivel; periph_hub lo auto-limpia al ciclo siguiente)
-//   ctrl_reg_i[7:4] = cmd    (0=WRITE 1=READ 2=RFIFO)
-//   tx_reg_i[15:8]  = dirección registro ADXL362
-//   tx_reg_i[7:0]   = dato (solo WRITE)
-//   rx_reg_o[7:0]   = byte recibido (byte 3 de la trama)
-//   data_reg_o[15:0]= {byte2, byte3} (RFIFO)
-//   busy_o          = 1 mientras transacción activa
+// Trama SPI - 3 bytes (24 bits), modo 0 (CPOL=0, CPHA=0), MSB first:
+//   Byte 0 : 0x0A (WRITE) ó 0x0B (READ)
+//   Byte 1 : reg_addr
+//   Byte 2 : dato  (0x00 en READ para clocar el reloj y recibir respuesta)
+//
+// Salidas al periph_hub:
+//   busy_o      → 1 mientras la transacción está en curso
+//   rx_reg_o    → {24'b0, byte_recibido}   (SPI_RX  0x02028 read)
+//   data_reg_o  → {24'b0, byte_recibido}   (SPI_DATA 0x0202C)
+//
+// Parámetro CLK_DIV:
+//   Medio período de SCK = CLK_DIV+1 ciclos de clk_i
+//   SCK = clk_i / (2*(CLK_DIV+1))
+//   Con clk=10 MHz, CLK_DIV=4 → SCK = 1 MHz  (< 8 MHz máx ADXL362)
 // =============================================================================
+
 module spi_master #(
     parameter int CLK_DIV = 4
 )(
     input  logic        clk_i,
     input  logic        rst_i,
 
-    input  logic [31:0] ctrl_reg_i,
-    input  logic [31:0] tx_reg_i,
-    output logic [31:0] rx_reg_o,
-    output logic [31:0] data_reg_o,
+    input  logic [31:0] ctrl_reg_i,   // [7:4]=cmd  [0]=start (pulso)
+    input  logic [31:0] tx_reg_i,     // [15:8]=reg_addr  [7:0]=dato
+
+    output logic [31:0] rx_reg_o,     // SPI_RX  : {24'b0, rx_byte}
+    output logic [31:0] data_reg_o,   // SPI_DATA: {24'b0, rx_byte}
     output logic        busy_o,
 
     output logic        spi_sck_o,
@@ -36,172 +43,139 @@ module spi_master #(
     output logic        spi_cs_n_o
 );
 
-    // ------------------------------------------------------------------
-    // Detección de flanco de start - robusto ante auto-clear externo
-    // El flanco se detecta sobre ctrl_reg_i[0] con un registro retardado.
-    // En el ciclo donde start sube se latcha cmd y tx_bytes.
-    // ------------------------------------------------------------------
-    logic start_prev;
-    logic start_pulse;
+    // -------------------------------------------------------------------------
+    localparam int      FRAME_BITS  = 24;
+    localparam int      CNT_MAX     = CLK_DIV;      // medio período - 1
+    localparam logic [7:0] CMD_WRITE = 8'h0A;
+    localparam logic [7:0] CMD_READ  = 8'h0B;
 
-    always_ff @(posedge clk_i or posedge rst_i)
-        if (rst_i) start_prev <= 1'b0;
-        else        start_prev <= ctrl_reg_i[0];
-
-    assign start_pulse = ctrl_reg_i[0] & ~start_prev;
-
-    // ------------------------------------------------------------------
-    // Latch de comando y bytes TX en el momento del start_pulse
-    // Así no importa que ctrl_reg_i cambie después.
-    // ------------------------------------------------------------------
-    logic [7:0] tx_b0_lat, tx_b1_lat, tx_b2_lat;
-
-    always_ff @(posedge clk_i or posedge rst_i) begin
-        if (rst_i) begin
-            tx_b0_lat <= '0;
-            tx_b1_lat <= '0;
-            tx_b2_lat <= '0;
-        end else if (start_pulse) begin
-            case (ctrl_reg_i[7:4])
-                4'd0: begin  // WRITE
-                    tx_b0_lat <= 8'h0A;
-                    tx_b1_lat <= tx_reg_i[15:8];
-                    tx_b2_lat <= tx_reg_i[7:0];
-                end
-                4'd1: begin  // READ
-                    tx_b0_lat <= 8'h0B;
-                    tx_b1_lat <= tx_reg_i[15:8];
-                    tx_b2_lat <= 8'h00;
-                end
-                4'd2: begin  // RFIFO
-                    tx_b0_lat <= 8'h0D;
-                    tx_b1_lat <= 8'h00;
-                    tx_b2_lat <= 8'h00;
-                end
-                default: begin
-                    tx_b0_lat <= 8'h00;
-                    tx_b1_lat <= 8'h00;
-                    tx_b2_lat <= 8'h00;
-                end
-            endcase
-        end
-    end
-
-    // ------------------------------------------------------------------
-    // Divisor de reloj para SCK
-    // ------------------------------------------------------------------
-    logic [$clog2(CLK_DIV)-1:0] div_cnt;
-    logic sck_tick;
-
-    always_ff @(posedge clk_i or posedge rst_i) begin
-        if (rst_i) div_cnt <= '0;
-        else if (div_cnt == CLK_DIV - 1) div_cnt <= '0;
-        else div_cnt <= div_cnt + 1;
-    end
-    assign sck_tick = (div_cnt == CLK_DIV - 1);
-
-    // ------------------------------------------------------------------
-    // FSM SPI modo 0
-    // ------------------------------------------------------------------
+    // -------------------------------------------------------------------------
+    // FSM
+    // -------------------------------------------------------------------------
     typedef enum logic [1:0] {
-        S_IDLE  = 2'd0,
-        S_SETUP = 2'd1,
-        S_XFER  = 2'd2,
-        S_HOLD  = 2'd3
+        IDLE  = 2'd0,
+        SETUP = 2'd1,   // CS_N baja, datos listos (1 ciclo)
+        SHIFT = 2'd2,   // transferencia bit a bit
+        DONE  = 2'd3    // CS_N sube, guardar rx_byte, 1 ciclo
     } state_t;
 
-    state_t      state;
-    logic [4:0]  bit_idx;
-    logic        sck_phase;
-    logic [23:0] shift_tx;
-    logic [23:0] shift_rx;
+    state_t state;
 
+    // -------------------------------------------------------------------------
+    // Registros
+    // -------------------------------------------------------------------------
+    logic [FRAME_BITS-1:0] tx_shift;          // shift register TX
+    logic [FRAME_BITS-1:0] rx_shift;          // shift register RX
+    logic [$clog2(FRAME_BITS):0]   bit_cnt;   // bits ya transferidos
+    logic [$clog2(2*CNT_MAX+2):0]  clk_cnt;   // prescaler
+    logic sck_r;
+    logic [7:0] rx_byte_r;
+
+    // -------------------------------------------------------------------------
+    // Salidas
+    // -------------------------------------------------------------------------
+    assign spi_sck_o  = sck_r;
+    // MOSI válido sólo durante SHIFT; en reposo = 0
+    assign spi_mosi_o = (state == SHIFT) ? tx_shift[FRAME_BITS-1] : 1'b0;
+    assign busy_o     = (state != IDLE);
+    assign rx_reg_o   = {24'b0, rx_byte_r};
+    assign data_reg_o = {24'b0, rx_byte_r};
+
+    // -------------------------------------------------------------------------
+    // FSM + datapath
+    // -------------------------------------------------------------------------
     always_ff @(posedge clk_i or posedge rst_i) begin
         if (rst_i) begin
-            state      <= S_IDLE;
-            bit_idx    <= 5'd0;
-            sck_phase  <= 1'b0;
-            shift_tx   <= '0;
-            shift_rx   <= '0;
+            state      <= IDLE;
             spi_cs_n_o <= 1'b1;
-            spi_mosi_o <= 1'b0;
-            spi_sck_o  <= 1'b0;
-            busy_o     <= 1'b0;
+            sck_r      <= 1'b0;
+            tx_shift   <= '0;
+            rx_shift   <= '0;
+            rx_byte_r  <= '0;
+            bit_cnt    <= '0;
+            clk_cnt    <= '0;
         end else begin
             case (state)
 
-                S_IDLE: begin
+                // --------------------------------------------------------
+                // IDLE - esperar pulso de start (1 ciclo, garantizado por
+                // periph_hub). No hay transición por reset ni basura.
+                // --------------------------------------------------------
+                IDLE: begin
+                    sck_r      <= 1'b0;
                     spi_cs_n_o <= 1'b1;
-                    spi_sck_o  <= 1'b0;
-                    spi_mosi_o <= 1'b0;
-                    if (start_pulse) begin
-                        busy_o    <= 1'b1;
-                        bit_idx   <= 5'd0;
-                        sck_phase <= 1'b0;
-                        // Los bytes ya están latcheados en tx_b*_lat
-                        // en este mismo ciclo de clock (start_pulse activo)
-                        // PERO el latch ff actualiza al SIGUIENTE flanco.
-                        // Por eso se usa shift_tx cargado en S_SETUP.
-                        state     <= S_SETUP;
+                    clk_cnt    <= '0;
+                    bit_cnt    <= '0;
+                    rx_shift   <= '0;
+
+                    // start debe ser 1 Y el módulo debe estar realmente idle
+                    if (ctrl_reg_i[0] == 1'b1) begin
+                        // Armar trama: byte0=CMD, byte1=reg_addr, byte2=dato
+                        if (ctrl_reg_i[4] == 1'b0)
+                            tx_shift <= {CMD_WRITE, tx_reg_i[15:8], tx_reg_i[7:0]};
+                        else
+                            tx_shift <= {CMD_READ,  tx_reg_i[15:8], tx_reg_i[7:0]};
+                        state <= SETUP;
                     end
                 end
 
-                S_SETUP: begin
-                    // Aquí tx_b*_lat ya tiene los valores correctos
-                    // (latcheados en el ciclo anterior junto con start_pulse)
+                // --------------------------------------------------------
+                // SETUP - CS_N baja, SCK en reposo (=0). Dura 1 ciclo.
+                // --------------------------------------------------------
+                SETUP: begin
                     spi_cs_n_o <= 1'b0;
-                    shift_rx   <= '0;   // limpiar residuo de transacción anterior
-                    if (sck_tick) begin
-                        shift_tx   <= {tx_b0_lat, tx_b1_lat, tx_b2_lat};
-                        spi_mosi_o <= tx_b0_lat[7];
-                        state      <= S_XFER;
+                    sck_r      <= 1'b0;
+                    clk_cnt    <= '0;
+                    state      <= SHIFT;
+                end
+
+                // --------------------------------------------------------
+                // SHIFT - modo 0 (CPOL=0, CPHA=0):
+                //   clk_cnt = 0..CNT_MAX-1  : SCK=0 (MOSI estable)
+                //   clk_cnt = CNT_MAX        : SCK sube → capturar MISO
+                //   clk_cnt = CNT_MAX+1..2*CNT_MAX : SCK=1
+                //   clk_cnt = 2*CNT_MAX+1    : SCK baja → desplazar TX,
+                //                              incrementar bit_cnt
+                // --------------------------------------------------------
+                SHIFT: begin
+                    clk_cnt <= clk_cnt + 1;
+
+                    // Flanco de SUBIDA de SCK → capturar MISO
+                    if (clk_cnt == CNT_MAX) begin
+                        sck_r    <= 1'b1;
+                        rx_shift <= {rx_shift[FRAME_BITS-2:0], spi_miso_i};
+                    end
+
+                    // Flanco de BAJADA de SCK → avanzar TX
+                    if (clk_cnt == (2 * CNT_MAX + 1)) begin
+                        sck_r   <= 1'b0;
+                        clk_cnt <= '0;
+                        // Desplazar DESPUÉS de haber enviado el bit actual
+                        tx_shift <= {tx_shift[FRAME_BITS-2:0], 1'b0};
+                        bit_cnt  <= bit_cnt + 1;
+
+                        if (bit_cnt == (FRAME_BITS - 1))
+                            state <= DONE;
                     end
                 end
 
-                S_XFER: begin
-                    if (sck_tick) begin
-                        sck_phase <= ~sck_phase;
-                        if (!sck_phase) begin
-                            // Flanco ascendente SCK: samplear MISO
-                            spi_sck_o <= 1'b1;
-                            shift_rx  <= {shift_rx[22:0], spi_miso_i};
-                        end else begin
-                            // Flanco descendente SCK: sacar siguiente MOSI
-                            spi_sck_o <= 1'b0;
-                            if (bit_idx == 5'd23) begin
-                                state <= S_HOLD;
-                            end else begin
-                                bit_idx    <= bit_idx + 1;
-                                shift_tx   <= {shift_tx[22:0], 1'b0};
-                                spi_mosi_o <= shift_tx[22];
-                            end
-                        end
-                    end
-                end
-
-                S_HOLD: begin
+                // --------------------------------------------------------
+                // DONE - 1 ciclo: CS_N sube, guardar resultado
+                // --------------------------------------------------------
+                DONE: begin
                     spi_cs_n_o <= 1'b1;
-                    spi_sck_o  <= 1'b0;
-                    spi_mosi_o <= 1'b0;
-                    busy_o     <= 1'b0;
-                    state      <= S_IDLE;
+                    sck_r      <= 1'b0;
+                    rx_byte_r  <= rx_shift[7:0];   // byte recibido en la trama
+                    state      <= IDLE;
                 end
 
+                default: begin
+                    state      <= IDLE;
+                    spi_cs_n_o <= 1'b1;
+                    sck_r      <= 1'b0;
+                end
             endcase
         end
     end
-
-    // ------------------------------------------------------------------
-    // Latch de recepción (se actualiza al entrar a S_HOLD)
-    // ------------------------------------------------------------------
-    logic [23:0] rx_latch;
-
-    always_ff @(posedge clk_i or posedge rst_i) begin
-        if (rst_i) rx_latch <= '0;
-        else if (state == S_HOLD) rx_latch <= shift_rx;
-    end
-
-    assign rx_reg_o   = {24'b0, rx_latch[7:0]};
-    assign data_reg_o = {16'b0, rx_latch[15:8], rx_latch[7:0]};
 
 endmodule
