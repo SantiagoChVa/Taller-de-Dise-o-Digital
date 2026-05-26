@@ -1,19 +1,27 @@
 // =============================================================================
-// periph_hub.sv  - MODIFICADO: auto-start SPI al escribir en SPI_TX
+// periph_hub.sv
 //
-// Mapa de memoria COMPLETO:
-//   0x02000  SW/BTN        R
-//   0x02004  LEDs          W
-//   0x02010  UART_CTRL     R  [0]=tx_busy [1]=rx_ready
-//   0x02018  UART_TX       W  / lectura del último byte enviado
-//   0x0201C  UART_RX       R
-//   0x02020  SPI_CTRL      RW [0]=start [1]=busy(ro) [7:4]=cmd
-//   0x02028  SPI_TX/RX     RW [31:16]=addr [7:0]=data (write) / rx_byte (read)
-//   0x0202C  SPI_DATA      R  [15:0]={byte_hi, byte_lo}
+// Mapa de memoria:
+//   0x02000  SW/BTN        R    [15:0] = switches debounced
+//   0x02004  LEDs          W    [15:0] = leds
+//   0x02010  UART_CTRL     R    [0]=tx_busy  [1]=rx_ready
+//   0x02018  UART_TX       W    [7:0]=byte a enviar
+//   0x0201C  UART_RX       R    [7:0]=byte recibido
+//   0x02020  SPI_CTRL      RW   write: [7:4]=cmd  [0]=start
+//                               read:  [1]=busy   [0]=0
+//   0x02028  SPI_TX (W) /  W    [15:8]=reg_addr  [7:0]=dato
+//            SPI_RX (R)    R    [7:0]=byte recibido
+//   0x0202C  SPI_DATA      R    [7:0]=byte recibido
 //
-// MEJORA: Escribir en SPI_TX (0x02028) también inicia automáticamente
-//         la transacción SPI si el SPI está idle. No es necesario escribir
-//         en SPI_CTRL a menos que se quiera cambiar el comando (READ/RFIFO).
+// Protocolo de escritura SPI (desde el .S):
+//   PASO 1: SW 0x02028 <- {reg_addr, dato}        (carga SPI_TX)
+//   PASO 2: SW 0x02020 <- 0x01 (WRITE) / 0x11 (READ)  (start=1, cmd en [4])
+//   PASO 3: poll LW 0x02020 bit[1] hasta busy=0
+//   PASO 4: LW 0x0202C para leer resultado
+//
+// NOTA: NO se implementa auto-start al escribir SPI_TX porque el .S siempre
+// escribe SPI_CTRL explícitamente. El auto-start previo causaba transacciones
+// espurias durante el reset y entre operaciones normales.
 // =============================================================================
 module periph_hub #(
     parameter int DEBOUNCE_CYCLES = 50_000,
@@ -23,19 +31,16 @@ module periph_hub #(
     input  logic        clk_i,
     input  logic        rst_i,
 
-    // --- Interfaz con el bus driver ---
     input  logic [31:0] addr_i,
     input  logic [31:0] wdata_i,
     input  logic        we_i,
     output logic [31:0] rdata_o,
 
-    // --- E/S físicas ---
     input  logic [15:0] sw_i,
     output logic [15:0] led_o,
     output logic        uart_tx_o,
     input  logic        uart_rx_i,
 
-    // --- SPI ---
     output logic        spi_sck_o,
     output logic        spi_mosi_o,
     input  logic        spi_miso_i,
@@ -48,7 +53,7 @@ module periph_hub #(
     logic [15:0] sw_sync1, sw_sync2;
     always_ff @(posedge clk_i or posedge rst_i) begin
         if (rst_i) begin sw_sync1 <= '0; sw_sync2 <= '0; end
-        else begin sw_sync1 <= sw_i; sw_sync2 <= sw_sync1; end
+        else        begin sw_sync1 <= sw_i; sw_sync2 <= sw_sync1; end
     end
 
     logic [15:0] sw_stable, sw_last;
@@ -84,12 +89,13 @@ module periph_hub #(
     logic [7:0] rx_byte;
 
     uart_tx #(.CLKS_PER_BIT(CLKS_PER_BIT)) u_tx (
-        .i_Clock    (clk_i), .i_Tx_DV(tx_dv), .i_Tx_Byte(tx_byte),
-        .o_Tx_Active(tx_active), .o_Tx_Serial(uart_tx_o), .o_Tx_Done(tx_done)
+        .i_Clock    (clk_i),     .i_Tx_DV    (tx_dv),
+        .i_Tx_Byte  (tx_byte),   .o_Tx_Active(tx_active),
+        .o_Tx_Serial(uart_tx_o), .o_Tx_Done  (tx_done)
     );
     uart_rx #(.CLKS_PER_BIT(CLKS_PER_BIT)) u_rx (
-        .i_Clock    (clk_i), .i_Rx_Serial(uart_rx_i),
-        .o_Rx_DV    (rx_dv), .o_Rx_Byte(rx_byte)
+        .i_Clock   (clk_i),     .i_Rx_Serial(uart_rx_i),
+        .o_Rx_DV   (rx_dv),     .o_Rx_Byte  (rx_byte)
     );
 
     logic [7:0] tx_pending_data;
@@ -99,102 +105,86 @@ module periph_hub #(
 
     always_ff @(posedge clk_i or posedge rst_i) begin
         if (rst_i) begin
-            uart_tx_data <= '0; uart_rx_data <= '0;
-            tx_busy <= 1'b0; rx_data_ready <= 1'b0;
-            tx_dv <= 1'b0; tx_byte <= '0;
-            tx_pending <= 1'b0; tx_pending_data <= '0;
+            uart_tx_data    <= '0; uart_rx_data <= '0;
+            tx_busy         <= 1'b0; rx_data_ready <= 1'b0;
+            tx_dv           <= 1'b0; tx_byte <= '0;
+            tx_pending      <= 1'b0; tx_pending_data <= '0;
         end else begin
+            tx_dv <= 1'b0;   // default: no disparar
+
             if (we_i && addr_i == 32'h02018) begin
                 uart_tx_data <= wdata_i[7:0];
                 if (!tx_active && !tx_pending) begin
-                    tx_byte <= wdata_i[7:0]; tx_dv <= 1'b1;
+                    tx_byte <= wdata_i[7:0];
+                    tx_dv   <= 1'b1;
                 end else begin
-                    tx_pending_data <= wdata_i[7:0]; tx_pending <= 1'b1;
+                    tx_pending_data <= wdata_i[7:0];
+                    tx_pending      <= 1'b1;
                 end
-            end else tx_dv <= 1'b0;
+            end
 
             if (tx_done && tx_pending) begin
-                tx_byte <= tx_pending_data; tx_dv <= 1'b1; tx_pending <= 1'b0;
+                tx_byte    <= tx_pending_data;
+                tx_dv      <= 1'b1;
+                tx_pending <= 1'b0;
             end
             tx_busy <= tx_active || tx_pending;
 
-            if (rx_dv) begin uart_rx_data <= rx_byte; rx_data_ready <= 1'b1; end
-            else if (reading_rx) rx_data_ready <= 1'b0;
+            if (rx_dv)            begin uart_rx_data <= rx_byte; rx_data_ready <= 1'b1; end
+            else if (reading_rx)  rx_data_ready <= 1'b0;
         end
     end
 
     // =========================================================================
-    // 4. SPI con AUTO-START al escribir en SPI_TX
+    // 4. SPI - registro de control y disparo
+    //
+    // El .S escribe:
+    //   SPI_CTRL (0x02020) <- 0x01  (cmd=WRITE, start=1)  → bit[4]=0
+    //   SPI_CTRL (0x02020) <- 0x11  (cmd=READ,  start=1)  → bit[4]=1
+    //
+    // spi_master recibe un pulso de 1 ciclo en ctrl_reg_i[0].
+    // Para generarlo: detectamos el flanco de escritura en SPI_CTRL con bit[0]=1
+    // y producimos exactamente 1 ciclo de start, luego lo borramos.
     // =========================================================================
-    logic [31:0] spi_ctrl_reg;   // 0x02020
-    logic [31:0] spi_tx_reg;     // 0x02028 (write: [15:8]=addr, [7:0]=data)
-    logic [31:0] spi_rx_reg;     // 0x02028 (read)
-    logic [31:0] spi_data_reg;   // 0x0202C (read)
+    logic [31:0] spi_tx_reg;    // captura de SPI_TX
+    logic [31:0] spi_ctrl_latch;// cmd latched (bits [7:4]) - sin bit start
+    logic        spi_start_q;   // pulso de 1 ciclo hacia spi_master
     logic        spi_busy;
-    
-    // Señales para auto-start
-    logic        spi_tx_written;      // Se escribió en SPI_TX en este ciclo
-    logic        start_auto;          // Start generado por auto-start
-    logic        start_explicit;      // Start explícito por SPI_CTRL
-    logic [31:0] effective_ctrl;      // Control efectivo para spi_master
-    
-    // Escritura de registros SPI
+
+    // Captura SPI_TX al escribir en 0x02028
+    always_ff @(posedge clk_i or posedge rst_i) begin
+        if (rst_i) spi_tx_reg <= '0;
+        else if (we_i && addr_i == 32'h02028) spi_tx_reg <= wdata_i;
+    end
+
+    // Latch de cmd y generación del pulso start (1 ciclo exacto)
     always_ff @(posedge clk_i or posedge rst_i) begin
         if (rst_i) begin
-            spi_ctrl_reg <= '0;
-            spi_tx_reg   <= '0;
-            spi_tx_written <= 1'b0;
+            spi_ctrl_latch <= '0;
+            spi_start_q    <= 1'b0;
         end else begin
-            // Detectar escritura en SPI_TX (señal de un ciclo)
-            if (we_i && addr_i == 32'h02028) begin
-                spi_tx_reg <= wdata_i;
-                spi_tx_written <= 1'b1;
-            end else begin
-                spi_tx_written <= 1'b0;
-            end
-            
-            // Escritura normal en SPI_CTRL (si se escribe, se sobreescribe)
-            if (we_i && addr_i == 32'h02020) begin
-                spi_ctrl_reg <= wdata_i;
-            end
-            
-            // Auto-clear del bit start después de un ciclo
-            // (tanto para start explícito como auto-start)
-            if (start_explicit || start_auto) begin
-                spi_ctrl_reg[0] <= 1'b0;
+            // Por defecto: limpiar pulso al siguiente ciclo
+            spi_start_q <= 1'b0;
+
+            if (we_i && addr_i == 32'h02020 && wdata_i[0] == 1'b1 && !spi_busy) begin
+                // Guardar cmd, generar pulso de start
+                spi_ctrl_latch <= wdata_i;
+                spi_start_q    <= 1'b1;
             end
         end
     end
-    
-    // Detección de start explícito por SPI_CTRL
-    // (flanco ascendente del bit 0 de spi_ctrl_reg)
-    logic spi_ctrl_start_prev;
-    always_ff @(posedge clk_i or posedge rst_i) begin
-        if (rst_i) spi_ctrl_start_prev <= 1'b0;
-        else spi_ctrl_start_prev <= spi_ctrl_reg[0];
-    end
-    assign start_explicit = spi_ctrl_reg[0] && !spi_ctrl_start_prev;
-    
-    // Start automático al escribir en SPI_TX (solo si SPI está idle)
-    assign start_auto = spi_tx_written && !spi_busy;
-    
-    // Señal de start combinada (prioridad: auto-start > explícito)
-    // Nota: si ambos ocurren en el mismo ciclo, auto-start tiene preferencia
-    wire start_combined = start_auto || start_explicit;
-    
-    // Control efectivo para el spi_master:
-    // - Si es auto-start, usamos cmd por defecto = WRITE (0)
-    // - Si es start explícito, usamos el cmd de spi_ctrl_reg
-    // - También propagamos el bit start (siempre 1 cuando start_combined)
-    assign effective_ctrl = start_auto ? 
-                            {spi_ctrl_reg[31:4], 4'b0000, 1'b0, 1'b1} :  // auto-start: cmd=WRITE, start=1
-                            {spi_ctrl_reg[31:1], 1'b1};                     // start explícito: usar cmd existente
-    
-    // Instancia del maestro SPI (conectado al control efectivo)
+
+    // ctrl_reg enviado al spi_master: cmd de latch + start = pulso
+    wire [31:0] spi_ctrl_to_master = {spi_ctrl_latch[31:1], spi_start_q};
+
+    // Registros de salida SPI
+    logic [31:0] spi_rx_reg;
+    logic [31:0] spi_data_reg;
+
     spi_master #(.CLK_DIV(SPI_CLK_DIV)) u_spi (
         .clk_i      (clk_i),
         .rst_i      (rst_i),
-        .ctrl_reg_i (effective_ctrl),   // Usamos control efectivo
+        .ctrl_reg_i (spi_ctrl_to_master),
         .tx_reg_i   (spi_tx_reg),
         .rx_reg_o   (spi_rx_reg),
         .data_reg_o (spi_data_reg),
@@ -207,6 +197,7 @@ module periph_hub #(
 
     // =========================================================================
     // 5. Multiplexor de lectura
+    //    SPI_CTRL read: [1]=busy, [0]=0 (start ya se autoclear en hardware)
     // =========================================================================
     always_comb begin
         case (addr_i)
@@ -215,7 +206,7 @@ module periph_hub #(
             32'h02010: rdata_o = {30'b0, rx_data_ready, tx_busy};
             32'h02018: rdata_o = {24'b0, uart_tx_data};
             32'h0201C: rdata_o = {24'b0, uart_rx_data};
-            32'h02020: rdata_o = {spi_ctrl_reg[31:2], spi_busy, spi_ctrl_reg[0]};
+            32'h02020: rdata_o = {30'b0, spi_busy, 1'b0};  // [1]=busy, [0]=0
             32'h02028: rdata_o = spi_rx_reg;
             32'h0202C: rdata_o = spi_data_reg;
             default:   rdata_o = 32'b0;
