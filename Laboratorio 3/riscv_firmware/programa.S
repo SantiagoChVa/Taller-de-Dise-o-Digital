@@ -206,27 +206,80 @@ phd_send:
         jal     ra, uart_tx
         ret
 
-spi_txrx:
-        addi    sp, sp, 1024
-        sw      ra, 0(sp)
+# ============================================================
+# SPI compatible con spi_master.sv actual
+#
+# SPI base s5 = 0x02020
+#   0(s5)  = SPI_CTRL
+#   8(s5)  = SPI_TX
+#   12(s5) = SPI_DATA
+#
+# WRITE:
+#   SPI_TX   <- {reg_addr, dato}
+#   SPI_CTRL <- 0x01
+#
+# READ:
+#   SPI_TX   <- {reg_addr, 0x00}
+#   SPI_CTRL <- 0x11
+# ============================================================
 
-        andi    a0, a0, 0xFF
-        beqz    a1, spi_no_hold
-        ori     a0, a0, 0x100
-
-spi_no_hold:
-        sw      a0, 8(s5)
-
-spi_wait_busy:
-        lw      t0, 0(s5)
-        andi    t0, t0, 1
-        bnez    t0, spi_wait_busy
-
-spi_wait_rx:
+spi_wait_done:
+        # Esperar a que busy suba
+spi_wait_start:
         lw      t0, 0(s5)
         andi    t0, t0, 2
-        beqz    t0, spi_wait_rx
+        beqz    t0, spi_wait_start
 
+        # Esperar a que busy baje
+spi_wait_finish:
+        lw      t0, 0(s5)
+        andi    t0, t0, 2
+        bnez    t0, spi_wait_finish
+
+        ret
+
+
+adxl_write_reg:
+        addi    sp, sp, -4
+        sw      ra, 0(sp)
+
+        # a0 = registro
+        # a1 = dato
+        slli    t0, a0, 8
+        andi    t1, a1, 0xFF
+        or      t0, t0, t1
+
+        # SPI_TX = {reg_addr, data}
+        sw      t0, 8(s5)
+
+        # SPI_CTRL = 0x01 -> WRITE + start
+        li      t1, 0x01
+        sw      t1, 0(s5)
+
+        jal     ra, spi_wait_done
+
+        lw      ra, 0(sp)
+        addi    sp, sp, 4
+        ret
+
+
+adxl_read_reg:
+        addi    sp, sp, -4
+        sw      ra, 0(sp)
+
+        # a0 = registro
+        slli    t0, a0, 8
+
+        # SPI_TX = {reg_addr, 0x00}
+        sw      t0, 8(s5)
+
+        # SPI_CTRL = 0x11 -> READ + start
+        li      t1, 0x11
+        sw      t1, 0(s5)
+
+        jal     ra, spi_wait_done
+
+        # Leer dato recibido
         lw      a0, 12(s5)
         andi    a0, a0, 0xFF
 
@@ -234,58 +287,18 @@ spi_wait_rx:
         addi    sp, sp, 4
         ret
 
-adxl_write_reg:
-        addi    sp, sp, -12
-        sw      ra, 8(sp)
-        sw      a0, 4(sp)
-        sw      a1, 0(sp)
-
-        li      a0, 0x0A
-        li      a1, 1
-        jal     ra, spi_txrx
-
-        lw      a0, 4(sp)
-        li      a1, 1
-        jal     ra, spi_txrx
-
-        lw      a0, 0(sp)
-        li      a1, 0
-        jal     ra, spi_txrx
-
-        lw      ra, 8(sp)
-        addi    sp, sp, 12
-        ret
-
-adxl_read_reg:
-        addi    sp, sp, -8
-        sw      ra, 4(sp)
-        sw      a0, 0(sp)
-
-        li      a0, 0x0B
-        li      a1, 1
-        jal     ra, spi_txrx
-
-        lw      a0, 0(sp)
-        li      a1, 1
-        jal     ra, spi_txrx
-
-        li      a0, 0x00
-        li      a1, 0
-        jal     ra, spi_txrx
-
-        lw      ra, 4(sp)
-        addi    sp, sp, 8
-        ret
 
 adxl_init:
-        addi    sp, sp, 1024
+        addi    sp, sp, -4
         sw      ra, 0(sp)
 
+        # SOFT_RESET = 0x52 en registro 0x1F
         li      a0, 0x1F
         li      a1, 0x52
         jal     ra, adxl_write_reg
         jal     ra, delay_long
 
+        # POWER_CTL = 0x02 en registro 0x2D
         li      a0, 0x2D
         li      a1, 0x02
         jal     ra, adxl_write_reg
@@ -295,62 +308,53 @@ adxl_init:
         addi    sp, sp, 4
         ret
 
+
 adxl_read_xyz:
-        addi    sp, sp, 1024
+        addi    sp, sp, -4
         sw      ra, 0(sp)
 
-        li      a0, 0x0B
-        li      a1, 1
-        jal     ra, spi_txrx
-
+        # X low = 0x0E
         li      a0, 0x0E
-        li      a1, 1
-        jal     ra, spi_txrx
-
-        li      a0, 0x00
-        li      a1, 1
-        jal     ra, spi_txrx
+        jal     ra, adxl_read_reg
         mv      t3, a0
 
-        li      a0, 0x00
-        li      a1, 1
-        jal     ra, spi_txrx
+        # X high = 0x0F
+        li      a0, 0x0F
+        jal     ra, adxl_read_reg
         slli    t4, a0, 8
         or      s0, t3, t4
         slli    s0, s0, 20
         srai    s0, s0, 20
 
-        li      a0, 0x00
-        li      a1, 1
-        jal     ra, spi_txrx
+        # Y low = 0x10
+        li      a0, 0x10
+        jal     ra, adxl_read_reg
         mv      t3, a0
 
-        li      a0, 0x00
-        li      a1, 1
-        jal     ra, spi_txrx
+        # Y high = 0x11
+        li      a0, 0x11
+        jal     ra, adxl_read_reg
         slli    t4, a0, 8
         or      s1, t3, t4
         slli    s1, s1, 20
         srai    s1, s1, 20
 
-        li      a0, 0x00
-        li      a1, 1
-        jal     ra, spi_txrx
+        # Z low = 0x12
+        li      a0, 0x12
+        jal     ra, adxl_read_reg
         mv      t3, a0
 
-        li      a0, 0x00
-        li      a1, 0
-        jal     ra, spi_txrx
+        # Z high = 0x13
+        li      a0, 0x13
+        jal     ra, adxl_read_reg
         slli    t4, a0, 8
         or      s2, t3, t4
         slli    s2, s2, 20
         srai    s2, s2, 20
 
-
         lw      ra, 0(sp)
         addi    sp, sp, 4
         ret
-
 delay_10ms:
         li      t0, 25000
 
