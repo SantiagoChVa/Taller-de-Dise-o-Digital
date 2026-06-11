@@ -1,0 +1,598 @@
+from __future__ import annotations
+
+import argparse
+import math
+import os
+import queue
+import re
+import struct
+import sys
+import threading
+import time
+from dataclasses import dataclass
+from typing import Dict, Iterable, List, Optional, Tuple
+
+
+TWO_PI = 2.0 * math.pi
+NUMBER_RE = re.compile(r"[-+]?\d+(?:\.\d+)?")
+
+
+KEYBOARD_MAP: Tuple[Tuple[str, str], ...] = (
+    ("z", "C3"),
+    ("s", "C#3"),
+    ("x", "D3"),
+    ("d", "D#3"),
+    ("c", "E3"),
+    ("v", "F3"),
+    ("g", "F#3"),
+    ("b", "G3"),
+    ("h", "G#3"),
+    ("n", "A3"),
+    ("j", "A#3"),
+    ("m", "B3"),
+    ("q", "C4"),
+    ("2", "C#4"),
+    ("w", "D4"),
+    ("3", "D#4"),
+    ("e", "E4"),
+    ("r", "F4"),
+    ("5", "F#4"),
+    ("t", "G4"),
+    ("6", "G#4"),
+    ("y", "A4"),
+    ("7", "A#4"),
+    ("u", "B4"),
+    ("i", "C5"),
+)
+
+WHITE_NOTES: Tuple[str, ...] = (
+    "C3",
+    "D3",
+    "E3",
+    "F3",
+    "G3",
+    "A3",
+    "B3",
+    "C4",
+    "D4",
+    "E4",
+    "F4",
+    "G4",
+    "A4",
+    "B4",
+    "C5",
+)
+
+BLACK_NOTES: Tuple[str, ...] = (
+    "C#3",
+    "D#3",
+    "F#3",
+    "G#3",
+    "A#3",
+    "C#4",
+    "D#4",
+    "F#4",
+    "G#4",
+    "A#4",
+)
+
+SEMITONES = {
+    "C": 0,
+    "C#": 1,
+    "D": 2,
+    "D#": 3,
+    "E": 4,
+    "F": 5,
+    "F#": 6,
+    "G": 7,
+    "G#": 8,
+    "A": 9,
+    "A#": 10,
+    "B": 11,
+}
+
+
+def note_frequency(note: str) -> float:
+    match = re.fullmatch(r"([A-G]#?)(-?\d+)", note)
+    if not match:
+        raise ValueError(f"Invalid note name: {note!r}")
+    name, octave_text = match.groups()
+    midi_note = (int(octave_text) + 1) * 12 + SEMITONES[name]
+    return 440.0 * (2.0 ** ((midi_note - 69) / 12.0))
+
+
+def parse_accel_ascii(line: bytes) -> Optional[Tuple[float, float, float]]:
+    """Accepts '12,-8,1020', 'X=12 Y=-8 Z=1020', etc."""
+    text = line.decode("ascii", errors="ignore").strip()
+    values = [float(value) for value in NUMBER_RE.findall(text)]
+    if len(values) < 3:
+        return None
+    return values[0], values[1], values[2]
+
+
+def decode_command(text: str) -> bytes:
+    if not text or text.lower() == "none":
+        return b""
+    return text.encode("utf-8").decode("unicode_escape").encode("latin1")
+
+
+def clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
+
+
+@dataclass
+class Voice:
+    key_name: str
+    note: str
+    frequency: float
+    phase: float = 0.0
+    age_samples: int = 0
+    released: bool = False
+    release_age_samples: int = 0
+    release_start: float = 0.0
+    last_envelope: float = 0.0
+
+
+class DistortionState:
+    def __init__( self, accel_scale: float, max_drive: float, calibrate_seconds: float, pitch_axis: str, pitch_bend_semitones: float, pitch_bend_scale: float, smoothing: float = 0.18, ) -> None:
+        axis_indexes = {"x": 0, "y": 1, "z": 2}
+        normalized_axis = pitch_axis.lower()
+        if normalized_axis not in axis_indexes:
+            raise ValueError(f"Invalid pitch axis: {pitch_axis!r}")
+        self.accel_scale = max(1.0, accel_scale)
+        self.max_drive = max(0.0, max_drive)
+        self.pitch_axis = normalized_axis
+        self.pitch_axis_index = axis_indexes[normalized_axis]
+        self.pitch_bend_semitones = max(0.0, pitch_bend_semitones)
+        self.pitch_bend_scale = max(1.0, pitch_bend_scale)
+        self.smoothing = clamp(smoothing, 0.01, 1.0)
+        self.lock = threading.RLock()
+        self.baseline: Optional[Tuple[float, float, float]] = None
+        self.raw: Optional[Tuple[float, float, float]] = None
+        self.samples_seen = 0
+        self.intensity = 0.0
+        self.pitch_bend = 0.0
+        self.last_update = 0.0
+        self.calibrating_until = 0.0
+        self.begin_calibration(calibrate_seconds)
+
+    def begin_calibration(self, seconds: float) -> None:
+        with self.lock:
+            self.baseline = None
+            self.samples_seen = 0
+            self.intensity = 0.0
+            self.pitch_bend = 0.0
+            self.calibrating_until = time.monotonic() + max(0.0, seconds)
+
+    def update(self, x_value: float, y_value: float, z_value: float) -> None:
+        now = time.monotonic()
+        sample = (float(x_value), float(y_value), float(z_value))
+
+        with self.lock:
+            self.raw = sample
+            self.last_update = now
+
+            if self.baseline is None:
+                self.baseline = sample
+                self.samples_seen = 1
+                return
+
+            if now <= self.calibrating_until:
+                self.samples_seen += 1
+                alpha = 1.0 / float(self.samples_seen)
+                self.baseline = tuple(
+                    old + alpha * (new - old)
+                    for old, new in zip(self.baseline, sample)
+                )
+                return
+
+            delta = math.sqrt(
+                sum((new - old) ** 2 for old, new in zip(self.baseline, sample))
+            )
+            target = clamp(delta / self.accel_scale, 0.0, 1.0)
+            self.intensity += self.smoothing * (target - self.intensity)
+
+            axis_delta = sample[self.pitch_axis_index] - self.baseline[self.pitch_axis_index]
+            pitch_target = (
+                clamp(axis_delta / self.pitch_bend_scale, -1.0, 1.0)
+                * self.pitch_bend_semitones
+            )
+            self.pitch_bend += self.smoothing * (pitch_target - self.pitch_bend)
+
+    def snapshot(self) -> Dict[str, object]:
+        with self.lock:
+            drive = 1.0 + self.max_drive * self.intensity
+            pitch_ratio = 2.0 ** (self.pitch_bend / 12.0)
+            age = time.monotonic() - self.last_update if self.last_update else None
+            return {
+                "raw": self.raw,
+                "baseline": self.baseline,
+                "intensity": self.intensity,
+                "drive": drive,
+                "pitch_axis": self.pitch_axis,
+                "pitch_bend": self.pitch_bend,
+                "pitch_bend_range": self.pitch_bend_semitones,
+                "pitch_ratio": pitch_ratio,
+                "sample_age": age,
+                "calibrating": time.monotonic() <= self.calibrating_until,
+            }
+
+
+class SynthEngine:
+    def __init__( self, np_module, sample_rate: int, distortion: DistortionState, max_polyphony: int = 16, ) -> None:
+        self.np = np_module
+        self.sample_rate = sample_rate
+        self.distortion = distortion
+        self.max_polyphony = max_polyphony
+        self.lock = threading.RLock()
+        self.voices: Dict[str, Voice] = {}
+        self.last_audio_status = ""
+
+    def note_on(self, key_name: str, note: str) -> None:
+        with self.lock:
+            if key_name in self.voices and not self.voices[key_name].released:
+                return
+
+            while len(self.voices) >= self.max_polyphony:
+                oldest_key = min(self.voices, key=lambda item: self.voices[item].age_samples)
+                self.voices.pop(oldest_key, None)
+
+            self.voices[key_name] = Voice(
+                key_name=key_name,
+                note=note,
+                frequency=note_frequency(note),
+            )
+
+    def note_off(self, key_name: str) -> None:
+        with self.lock:
+            voice = self.voices.get(key_name)
+            if voice and not voice.released:
+                voice.released = True
+                voice.release_start = max(voice.last_envelope, 0.02)
+                voice.release_age_samples = 0
+
+    def all_notes_off(self) -> None:
+        with self.lock:
+            for voice in self.voices.values():
+                if not voice.released:
+                    voice.released = True
+                    voice.release_start = max(voice.last_envelope, 0.02)
+                    voice.release_age_samples = 0
+
+    def active_notes(self) -> List[str]:
+        with self.lock:
+            return [voice.note for voice in self.voices.values() if not voice.released]
+
+    def _envelope(self, voice: Voice, frames: int):
+        np = self.np
+        positions = np.arange(frames, dtype=np.float32)
+
+        if voice.released:
+            release_samples = max(1, int(0.16 * self.sample_rate))
+            release_pos = voice.release_age_samples + positions
+            envelope = voice.release_start * np.exp(-release_pos / release_samples)
+            voice.release_age_samples += frames
+            voice.last_envelope = float(envelope[-1])
+            return 0.18 * envelope
+
+        attack_samples = max(1, int(0.007 * self.sample_rate))
+        decay_samples = max(1, int(0.55 * self.sample_rate))
+        sustain_level = 0.42
+        note_pos = voice.age_samples + positions
+        attack = np.minimum(note_pos / attack_samples, 1.0)
+        decay_pos = np.maximum(note_pos - attack_samples, 0.0)
+        decay = sustain_level + (1.0 - sustain_level) * np.exp(-decay_pos / decay_samples)
+        envelope = np.where(note_pos < attack_samples, attack, decay)
+        voice.age_samples += frames
+        voice.last_envelope = float(envelope[-1])
+        return 0.18 * envelope
+
+    def callback(self, outdata, frames: int, time_info, status) -> None:
+        np = self.np
+        if status:
+            self.last_audio_status = str(status)
+
+        snapshot = self.distortion.snapshot()
+        pitch_ratio = float(snapshot["pitch_ratio"])
+        signal = np.zeros(frames, dtype=np.float32)
+        positions = np.arange(frames, dtype=np.float32)
+        finished: List[str] = []
+
+        with self.lock:
+            for key_name, voice in list(self.voices.items()):
+                envelope = self._envelope(voice, frames)
+                phase_step = TWO_PI * voice.frequency * pitch_ratio / self.sample_rate
+                phase = voice.phase + phase_step * positions
+                oscillator = (
+                    0.78 * np.sin(phase)
+                    + 0.16 * np.sin(2.0 * phase)
+                    + 0.06 * np.sin(3.0 * phase)
+                )
+                signal += envelope * oscillator
+                voice.phase = float((voice.phase + phase_step * frames) % TWO_PI)
+
+                if voice.released and voice.last_envelope < 0.001:
+                    finished.append(key_name)
+
+            for key_name in finished:
+                self.voices.pop(key_name, None)
+
+        amount = float(snapshot["intensity"])
+        drive = float(snapshot["drive"])
+        wet = clamp(0.08 + 0.92 * amount, 0.0, 1.0)
+
+        if drive > 1.001:
+            distorted = np.tanh(signal * drive) / np.tanh(drive)
+            signal = (1.0 - wet) * signal + wet * distorted
+
+        signal = np.tanh(signal * 0.95).astype(np.float32)
+        outdata[:, 0] = signal
+        outdata[:, 1] = signal
+
+
+class SerialReader(threading.Thread):
+    def __init__( self, serial_module, port: str, baud_rate: int, serial_format: str, start_command: bytes, stop_command: bytes, distortion: DistortionState, messages: "queue.Queue[str]", ) -> None:
+        super().__init__(daemon=True)
+        self.serial_module = serial_module
+        self.port = port
+        self.baud_rate = baud_rate
+        self.serial_format = serial_format
+        self.start_command = start_command
+        self.stop_command = stop_command
+        self.distortion = distortion
+        self.messages = messages
+        self.stop_event = threading.Event()
+        self.connection = None
+
+    def stop(self) -> None:
+        self.stop_event.set()
+        if self.connection and self.stop_command:
+            try:
+                self.connection.write(self.stop_command)
+                self.connection.flush()
+            except Exception as exc:  # noqa: BLE001
+                self.messages.put(f"No se pudo enviar STOP: {exc}")
+
+    def run(self) -> None:
+        try:
+            with self.serial_module.Serial(
+                self.port,
+                self.baud_rate,
+                timeout=0.05,
+                write_timeout=0.2,
+            ) as connection:
+                self.connection = connection
+                self.messages.put(f"UART conectado en {self.port} @ {self.baud_rate}")
+
+                if self.start_command:
+                    connection.write(self.start_command)
+                    connection.flush()
+                    self.messages.put(f"Enviado inicio: {self.start_command!r}")
+
+                if self.serial_format == "ascii":
+                    self._read_ascii(connection)
+                else:
+                    self._read_binary(connection)
+
+        except Exception as exc:  # noqa: BLE001
+            self.messages.put(f"UART inactivo: {exc}")
+        finally:
+            self.connection = None
+
+    def _read_ascii(self, connection) -> None:
+        while not self.stop_event.is_set():
+            line = connection.readline()
+            if not line:
+                continue
+            sample = parse_accel_ascii(line)
+            if sample is None:
+                continue
+            self.distortion.update(*sample)
+
+    def _read_binary(self, connection) -> None:
+        formats = {
+            "bin16le": "<hhh",
+            "bin16be": ">hhh",
+            "bin32le": "<iii",
+            "bin32be": ">iii",
+        }
+        packet_format = formats[self.serial_format]
+        packet_size = struct.calcsize(packet_format)
+        buffer = bytearray()
+
+        while not self.stop_event.is_set():
+            chunk = connection.read(packet_size - len(buffer))
+            if not chunk:
+                continue
+            buffer.extend(chunk)
+            if len(buffer) < packet_size:
+                continue
+            x_value, y_value, z_value = struct.unpack(packet_format, buffer[:packet_size])
+            del buffer[:packet_size]
+            self.distortion.update(x_value, y_value, z_value)
+
+
+class SimulatedAccelerometer(threading.Thread):
+    def __init__(self, distortion: DistortionState, messages: "queue.Queue[str]") -> None:
+        super().__init__(daemon=True)
+        self.distortion = distortion
+        self.messages = messages
+        self.stop_event = threading.Event()
+
+    def stop(self) -> None:
+        self.stop_event.set()
+
+    def run(self) -> None:
+        self.messages.put("Acelerometro simulado activo")
+        start = time.monotonic()
+        while not self.stop_event.is_set():
+            elapsed = time.monotonic() - start
+            x_value = 420.0 * math.sin(2.1 * elapsed)
+            y_value = 260.0 * math.sin(1.3 * elapsed + 0.7)
+            z_value = 1000.0 + 180.0 * math.sin(0.9 * elapsed)
+            self.distortion.update(x_value, y_value, z_value)
+            time.sleep(0.01)
+
+
+def list_ports(serial_module) -> None:
+    from serial.tools import list_ports as pyserial_list_ports
+
+    ports = list(pyserial_list_ports.comports())
+    if not ports:
+        print("No se encontraron puertos seriales.")
+        return
+    for port in ports:
+        print(f"{port.device}\t{port.description}")
+
+
+def resolve_port(serial_module, requested_port: str) -> Optional[str]:
+    if requested_port.lower() == "none":
+        return None
+    if requested_port.lower() != "auto":
+        return requested_port
+
+    from serial.tools import list_ports as pyserial_list_ports
+
+    ports = list(pyserial_list_ports.comports())
+    if not ports:
+        return None
+    if len(ports) == 1:
+        return ports[0].device
+    return ports[0].device
+
+
+def run_self_test() -> None:
+    assert parse_accel_ascii(b"1,2,-3") == (1.0, 2.0, -3.0)
+    assert parse_accel_ascii(b"X=-12 Y=4 Z=1005") == (-12.0, 4.0, 1005.0)
+    assert round(note_frequency("A4"), 4) == 440.0
+    assert round(note_frequency("C4"), 2) == 261.63
+    state = DistortionState(
+        accel_scale=800.0,
+        max_drive=28.0,
+        calibrate_seconds=0.0,
+        pitch_axis="x",
+        pitch_bend_semitones=2.0,
+        pitch_bend_scale=500.0,
+    )
+    state.update(0.0, 0.0, 1000.0)
+    state.calibrating_until = 0.0
+    state.update(500.0, 0.0, 1000.0)
+    assert float(state.snapshot()["pitch_bend"]) > 0.0
+    state.update(-500.0, 0.0, 1000.0)
+    assert float(state.snapshot()["pitch_bend"]) < 2.0
+    print("Self-test OK")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Sintetizador de piano por teclado con distorsion via acelerometro FPGA/UART."
+    )
+    parser.add_argument("--port", default="auto", help="COMx, auto, o none para probar sin FPGA.")
+    parser.add_argument(
+        "--simulate-accel",
+        action="store_true",
+        help="Genera X/Y/Z falsos para probar la distorsion sin FPGA.",
+    )
+    parser.add_argument("--baud", type=int, default=115200, help="Baud rate UART.")
+    parser.add_argument(
+        "--serial-format",
+        choices=("ascii", "bin16le", "bin16be", "bin32le", "bin32be"),
+        default="ascii",
+        help="Formato recibido desde la FPGA.",
+    )
+    parser.add_argument(
+        "--start-command",
+        default="START\\n",
+        help="Bytes que Python envia a la FPGA al iniciar. Use none para desactivar.",
+    )
+    parser.add_argument(
+        "--stop-command",
+        default="STOP\\n",
+        help="Bytes que Python envia a la FPGA al cerrar. Use none para desactivar.",
+    )
+    parser.add_argument(
+        "--accel-scale",
+        type=float,
+        default=800.0,
+        help="Delta de acelerometro que equivale a distorsion maxima.",
+    )
+    parser.add_argument(
+        "--max-drive",
+        type=float,
+        default=28.0,
+        help="Ganancia maxima de distorsion por tanh.",
+    )
+    parser.add_argument(
+        "--pitch-axis",
+        choices=("x", "y", "z"),
+        default="x",
+        help="Eje del acelerometro usado para pitch bend.",
+    )
+    parser.add_argument(
+        "--pitch-bend-semitones",
+        type=float,
+        default=2.0,
+        help="Rango maximo del pitch bend en semitonos hacia arriba/abajo.",
+    )
+    parser.add_argument(
+        "--pitch-bend-scale",
+        type=float,
+        default=500.0,
+        help="Delta del eje elegido que equivale al pitch bend maximo.",
+    )
+    parser.add_argument(
+        "--calibrate-seconds",
+        type=float,
+        default=1.2,
+        help="Tiempo inicial para medir la posicion neutra del acelerometro.",
+    )
+    parser.add_argument("--sample-rate", type=int, default=44100, help="Frecuencia de muestreo de audio.")
+    parser.add_argument("--blocksize", type=int, default=256, help="Tamano del bloque de audio.")
+    parser.add_argument("--audio-device", default=None, help="Indice/nombre de dispositivo de salida.")
+    parser.add_argument("--list-ports", action="store_true", help="Lista puertos seriales y sale.")
+    parser.add_argument("--list-audio-devices", action="store_true", help="Lista dispositivos de audio y sale.")
+    parser.add_argument("--self-test", action="store_true", help="Ejecuta pruebas basicas sin abrir audio/UART.")
+    return parser
+
+
+def import_runtime_dependencies():
+    os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
+    missing = []
+    try:
+        import numpy as np  # type: ignore
+    except ImportError:
+        np = None
+        missing.append("numpy")
+
+    try:
+        import pygame  # type: ignore
+    except ImportError:
+        pygame = None
+        missing.append("pygame")
+
+    try:
+        import serial  # type: ignore
+    except ImportError:
+        serial = None
+        missing.append("pyserial")
+
+    try:
+        import sounddevice as sd  # type: ignore
+    except ImportError:
+        sd = None
+        missing.append("sounddevice")
+
+    if missing:
+        joined = ", ".join(missing)
+        print(f"Faltan dependencias: {joined}")
+        print("Instala con: python -m pip install -r requirements.txt")
+        raise SystemExit(1)
+
+    return np, pygame, serial, sd
+
+
+def import_serial_dependency():
+    try:
+        import serial  # type: ignore
+    except ImportError:
+        print("Falta
